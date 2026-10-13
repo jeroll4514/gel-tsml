@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Create or update the conda environment from env.yml
+
+ENV_NAME="$(grep name env.yml | awk '{print $2}')"
+
+if ! command -v conda >/dev/null 2>&1; then
+	echo "conda not found on PATH.  Install Miniconda first." >&2
+	exit 1
+fi
+
+if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+	echo "Updating existing env '$ENV_NAME'..."
+	conda env update -n "$ENV_NAME" -f env.yml --prune
+else
+	echo "Creating env '$ENV_NAME'..."
+	conda env create -f env.yml
+fi
+
+echo "Verifying install..."
+conda run -n "$ENV_NAME" python -c '
+import numpy, pandas, sklearn, matplotlib, jax
+print("numpy", numpy.__version__)
+print("pandas", pandas.__version__)
+print("sklearn", sklearn.__version__)
+print("jax", jax.__version__)
+print("\tJAX devices:", jax.devices())
+print("matplotlib", matplotlib.__version__)
+'
+
+echo
+echo "Done. Activate with: conda activate $ENV_NAME"
