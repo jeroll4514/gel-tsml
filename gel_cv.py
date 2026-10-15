@@ -29,8 +29,11 @@ def balanced_weights(exp_idx: np.ndarray, include: np.ndarray) -> np.ndarray:
 	counts = np.bincount(exp_idx, minlength=include.size)
 	return np.where(include[exp_idx], 1/np.maximum(counts[exp_idx], 1), 0.0) 
 
-def make_splits(exp_idx: np.ndarray, num_experiments: int) -> tuple[np.ndarray, list, list]:
+def make_splits(exp_idx: np.ndarray, num_experiments: int, tests: list | None = None) -> tuple[np.ndarray, list, list]:
 	"""
+	Arguments:
+		tests (list | None): only build the splits for these test experiments, None = every experiment
+
 	Returns:
 		W (splits, samples): training weights
 		pairs: list of (test, val) for the first rows of W
@@ -38,8 +41,9 @@ def make_splits(exp_idx: np.ndarray, num_experiments: int) -> tuple[np.ndarray, 
 	"""
 
 	present = np.unique(exp_idx) # experiments with at least one window
-	pairs = list(permutations(present, 2))
-	refits = list(present)
+	tests = present if tests is None else [test for test in tests if test in present] # overlap of tests and present
+	pairs = [(test, val) for test, val in permutations(present, 2) if test in tests]
+	refits = list(tests)
 
 	W = []
 	for test, val in pairs:
@@ -77,7 +81,8 @@ def cross_validate(
 	baseline: np.ndarray | None = None,
 	balance_classes: bool = False,
 	n_iter: int = 3_000,
-	backend: str = "jax"
+	backend: str = "jax",
+	tests: list | None = None
 ) -> dict:
 	"""
 	Runs the full (split x lambda) grid for one target and summarizes both evaluation schemes.
@@ -95,6 +100,7 @@ def cross_validate(
 			otherwise biases every held-out prediction away from the true class.
 		n_iter (int): the maximum number of steps to determine converged coefficients
 		backend (str): "jax" or "sklearn", which fit_grid to use
+		tests (list | None): only score these test experiments (used by cross_validate_foldwise), None = all
 	
 	Returns dict with:
 		"pairs": DataFrame, one row per (test, val) pair
@@ -105,7 +111,7 @@ def cross_validate(
 
 	X, y = ws.X, ws.targets[target]
 	num_experiments = ws.num_experiments
-	W, pairs, refits = make_splits(ws.exp_idx, num_experiments)
+	W, pairs, refits = make_splits(ws.exp_idx, num_experiments, tests)
 	if balance_classes and task == "classification":
 		class_weight = W @ y # (splits, k)
 		W = W * ((y / np.where(class_weight > 0, class_weight, np.inf)[:, None, :]).sum(axis=2))
@@ -152,6 +158,11 @@ def cross_validate(
 		})
 	nested_df = pd.DataFrame(rows)
 
+	edge = nested_df["lam"].isin([np.min(lams), np.max(lams)])
+	if edge.any():
+		print(f"cross_validate: WARNING, {target} ({L1_ratio=}) chose a lambda at the edge of the grid for "
+			f"{edge.sum()}/{len(edge)} test experiments, consider widening lams.")
+
 	refit_rows = num_pairs + np.arange(len(refits))
 	chosen_params = {key: np.asarray(val[refit_rows, best_idx]) for key, val in params.items()}
 	chosen_preds = np.asarray(preds[refit_rows, best_idx]) # (tests, n, k)
@@ -159,6 +170,50 @@ def cross_validate(
 	return {
 		"pairs": pairs_df, "nested": nested_df, "val_curves": np.asarray(curves), "lams": lams,
 		"refits": refits, "params": chosen_params, "preds": chosen_preds
+	}
+
+def cross_validate_foldwise(
+	build_windows,
+	num_experiments: int,
+	target: str,
+	task: str,
+	lams: np.ndarray,
+	L1_ratio: float = 0.0,
+	persistence_baseline: bool = False,
+	balance_classes: bool = False,
+	n_iter: int = 3_000,
+	backend: str = "jax"
+) -> dict:
+	"""
+	cross_validate for features that must be fit per fold (e.g. PCA): for each test experiment, build_windows(test)
+	returns a window_set whose features were fit WITHOUT that experiment, and only that experiment's splits are run
+	on it.  Same total work as one cross_validate call, same return dict.
+
+	Arguments:
+		build_windows: function(test expreiment index) -> window_set (same windows every time, only X differs)
+		num_experiments: number of experiments
+		persistence_baseline: score the baseline as ws.persistence() (the forecast task)
+		other arguments: see cross_validate
+	"""
+
+	folds = []
+	for test in range(num_experiments):
+		ws = build_windows(test)
+		if not np.any(ws.exp_idx == test):
+			continue # experiment too short to give any windows
+		baseline = ws.persistence() if persistence_baseline else None
+		folds.append(cross_validate(
+			ws, target, task, lams, L1_ratio, baseline, balance_classes, n_iter, backend, tests=[test]
+		))
+	
+	return {
+		"pairs": pd.concat([fold["pairs"] for fold in folds], ignore_index=True),
+		"nested": pd.concat([fold["nested"] for fold in folds], ignore_index=True),
+		"val_curves": np.concatenate([fold["val_curves"] for fold in folds]),
+		"lams": lams,
+		"refits": [test for fold in folds for test in fold["refits"]],
+		"params": {key: np.concatenate([fold["params"][key] for fold in folds]) for key in folds[0]["params"]},
+		"preds": np.concatenate([fold["preds"] for fold in folds])
 	}
 
 def test_predictions(ws: window_set, result: dict, target: str) -> pd.DataFrame:

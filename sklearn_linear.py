@@ -53,7 +53,13 @@ def fit_grid(X, y, W, lams, L1_ratio=0.0, task="regression", n_iter=3_000):
 		elif task == "classification":
 			labels = y.argmax(axis=1)
 			solver = "lbfgs" if L1_ratio == 0.0 else "saga"
-			model = LogisticRegression(l1_ratio=L1_ratio, solver=solver, warm_start=True, max_iter=n_iter, tol=1e-6)
+
+			# Binary: sklearn fits one logit vector beta, while JAX softmax fits two columns B0 = -B1 = beta/2, whose
+			# penality is lam*( (1-a)/4 ||beta||^2 + a ||beta||_1 ).  Matching sklearn's (1-r)/2 ||.||^2 + r ||.||_1
+			# gives lam_eff = lam*(1+a)/2 and r = 2a/(1+a).  Multiclass uses the full softmax: lam_eff = lam, r = a
+			lam_scale = (1 + L1_ratio) / 2 if k == 2 else 1.0
+			ratio = 2 * L1_ratio / (1 + L1_ratio) if k == 2 else L1_ratio
+			model = LogisticRegression(l1_ratio=ratio, solver=solver, warm_start=True, max_iter=n_iter, tol=1e-6)
 		else:
 			raise ValueError(f"fit_grid: task must be 'regression' or 'classification', received {task}.")
 
@@ -74,12 +80,13 @@ def fit_grid(X, y, W, lams, L1_ratio=0.0, task="regression", n_iter=3_000):
 					preds[s, l] = X @ coeff + bias
 
 				else: # classification
-					model.set_params(C = 1/(lam * w.sum()))
+					model.set_params(C = 1/(lam * lam * w.sum()))
 					model.fit(X_centered[train], labels[train], sample_weight=w)
 
 					B, b = np.zeros((p, k)), np.zeros(k)
 					if k == 2: # sklearn fits ONE weight vector for binary problems --> the logit of class 1
-						B[:, 1], b[1] = model.coef_[0], model.intercept_[0]
+						B[:, 1], b[1] = model.coef_[0] / 2, model.intercept_[0] / 2 # symmetric split, same as JAX
+						B[:, 0], b[0] = -B[:, 1], -b[1]
 					else:
 						B[:, model.classes_], b[model.classes_] = model.coef_.T, model.intercept_
 
