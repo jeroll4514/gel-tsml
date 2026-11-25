@@ -80,7 +80,7 @@ def fit_grid(X, y, W, lams, L1_ratio=0.0, task="regression", n_iter=3_000):
 					preds[s, l] = X @ coeff + bias
 
 				else: # classification
-					model.set_params(C = 1/(lam * lam * w.sum()))
+					model.set_params(C = 1/(lam * w.sum()))
 					model.fit(X_centered[train], labels[train], sample_weight=w)
 
 					B, b = np.zeros((p, k)), np.zeros(k)
